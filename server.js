@@ -13,7 +13,7 @@ mongoose.connect(mongoURI)
   .then(() => console.log('Connected to MongoDB Atlas successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// تعريف نماذج قاعدة البيانات (Schemas & Models)
+// تعريف نماذج قاعدة البيانات
 const memberSchema = new mongoose.Schema({
   id: { type: String, unique: true, required: true },
   name: String,
@@ -44,7 +44,6 @@ const requestSchema = new mongoose.Schema({
 });
 const Request = mongoose.model('Request', requestSchema);
 
-// متغيرات عامة وبنية البيانات في الذاكرة مؤقتاً للتوافق
 let D = {
   seq: 1, inv: 1, nid: 1, 
   secret: crypto.randomBytes(32).toString('hex'),
@@ -81,7 +80,6 @@ const tries = {}, blocked = ip => (tries[ip] = (tries[ip] || []).filter(t => Dat
 const pubM = ({ salt, hash, ...x }) => x, str = (v, n = 100) => String(v ?? '').trim().slice(0, n), nid = () => ++D.nid;
 const planOf = id => D.plans.find(p => p.id === id);
 
-// دالة مساعدة لحذف ملف الإيصال من المجلد
 const removeProof = (id) => {
   for (const e of Object.values(EXT)) {
     const f = path.join(PROOFS, id + '.' + e);
@@ -111,7 +109,6 @@ function renewM(m, p, txn) {
   D.invs.push({ n: D.inv++, m: m.id, plan: p.name, amt: p.price, date: today(), kind: 'تجديد', ...(txn ? { pay: 'شام كاش' } : {}) });
 }
 
-// كائنات العمليات (Actions)
 const A = {
   async memberSave(d) {
     const name = str(d.name), p = planOf(d.plan);
@@ -185,7 +182,6 @@ const A = {
     if (!r) throw Error('الطلب غير موجود');
     const m = await Member.findOne({ id: r.m }), p = planOf(r.plan);
     
-    // حذف الطلب وإزالة ملف الإيصال من المجلد فوراً
     await Request.deleteOne({ id: d.id });
     removeProof(r.id);
 
@@ -202,7 +198,6 @@ const A = {
     const r = await Request.findOne({ id: d.id });
     if (!r) return;
     
-    // حذف الطلب وإزالة ملف الإيصال من المجلد فوراً
     await Request.deleteOne({ id: d.id });
     removeProof(r.id);
 
@@ -236,4 +231,126 @@ const A = {
           n = new Date().toISOString(), last = [...D.att].reverse().find(a => a.m === u.id),
           lt = o ? new Date(o.in).getTime() : (last && last.out ? new Date(last.out).getTime() : 0);
     if (lt && Date.now() - lt < 20000) return { msg: ['تم تسجيلك قبل لحظات', 'warn'] };
-    if (o) { o.out = n
+    if (o) { o.out = n; return { msg: ['تم تسجيل خروجك. نراك قريباً', 'ok'] }; }
+    const left = Math.round((new Date(m.end) - new Date(today())) / 864e5);
+    if (left < 0) throw Error('اشتراكك منتهي، جدّد اشتراكك أولاً');
+    D.att.push({ m: u.id, in: n, out: null });
+    return { msg: ['تم تسجيل دخولك. تمرين موفق!', 'ok'] };
+  },
+
+  gateRegen() { D.gateToken = crypto.randomBytes(9).toString('base64url'); },
+  expenseAdd(d, u) {
+    const amount = +d.amount, noteText = str(d.note, 300), cat = CATS.includes(d.cat) ? d.cat : 'أخرى',
+          date = /^\d{4}-\d{2}-\d{2}$/.test(String(d.date || '')) ? d.date : today();
+    if (!(amount > 0 && amount < 1e12)) throw Error('المبلغ غير صحيح');
+    if (!noteText) throw Error('اكتب ملاحظة');
+    D.expenses.push({ id: nid(), date, amount, cat, note: noteText, by: u.u });
+  },
+  expenseDel(d) { D.expenses = D.expenses.filter(x => x.id !== +d.id); },
+  partnersSave(d) {
+    const L = Array.isArray(d.partners) ? d.partners.slice(0, 3) : [];
+    if (L.length !== 3) throw Error('يجب تحديد 3 شركاء');
+    D.partners = L.map((p, i) => ({ name: str(p.name, 40) || 'الشريك ' + (i + 1), pct: Math.round((+p.pct || 0) * 100) / 100 }));
+  },
+  seen(d, u) { D.seen[u.id] = Math.max(D.seen[u.id] || 0, +d.id || 0); }
+};
+
+const CATS = ['أجهزة', 'صيانة', 'إكسسوارات', 'إيجار', 'رواتب', 'أخرى'];
+const M = ['reqRenew', 'seen', 'pwChange', 'selfGate'], ACC = ['renew', 'approve', 'reject', 'expenseAdd'];
+
+const app = express();
+app.set('trust proxy', 1);
+app.use((q, r, n) => q.path === '/api/act' ? n() : express.json({ limit: '100kb' })(q, r, n));
+app.use((q, r, n) => { r.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' }); n(); });
+
+const pub = path.join(__dirname, 'public');
+app.get('/', (q, r) => r.redirect('/app'));
+app.get('/admin', (q, r) => r.sendFile(pub + '/admin.html'));
+app.get('/app', (q, r) => r.sendFile(pub + '/member.html'));
+app.use(express.static(pub, { index: false }));
+
+const auth = (q, r, n) => { const o = verify((q.headers.authorization || '').slice(7)); if (!o) return r.status(401).json({ error: 'انتهت الجلسة' }); q.u = o; n(); };
+
+app.post('/api/login/staff', (q, r) => {
+  const ip = q.ip, { u, p } = q.body || {};
+  if (blocked(ip)) return r.status(429).json({ error: 'محاولات كثيرة' });
+  const s = D.staff.find(x => x.u.toLowerCase() === str(u, 30).toLowerCase());
+  if (!s || !chk(p, s)) { bad(ip); return r.status(401).json({ error: 'خطأ في بيانات الدخول' }); }
+  r.json({ token: sign({ k: 's', u: s.u, role: s.role }, 12) });
+});
+
+app.post('/api/login/member', async (q, r) => {
+  const ip = q.ip, { code, pw } = q.body || {};
+  if (blocked(ip)) return r.status(429).json({ error: 'محاولات كثيرة' });
+  const m = await Member.findOne({ id: str(code, 20).toUpperCase() });
+  if (!m || !chk(pw, m)) { bad(ip); return r.status(401).json({ error: 'خطأ في بيانات الدخول' }); }
+  r.json({ token: sign({ k: 'm', id: m.id }, 720) });
+});
+
+app.get('/api/state', auth, async (q, r) => {
+  if (q.u.k !== 's') return r.status(403).json({ error: 'ممنوع' });
+  const st = stState(q.u);
+  st.members = (await Member.find()).map(pubM);
+  st.reqs = await Request.find();
+  r.json({ state: st, me: { u: q.u.u, role: q.u.role } });
+});
+
+app.get('/api/me', auth, async (q, r) => {
+  if (q.u.k !== 'm') return r.status(403).json({ error: 'ممنوع' });
+  const m = await Member.findOne({ id: q.u.id });
+  if (!m) return r.status(403).json({ error: 'ممنوع' });
+  const st = mState(q.u.id);
+  st.members = [pubM(m)];
+  st.reqs = await Request.find({ m: q.u.id });
+  r.json({ state: st });
+});
+
+app.get('/api/vapid', (q, r) => r.json({ key: D.vapid.publicKey }));
+app.get('/api/count', auth, (q, r) => r.json({ n: D.att.filter(a => !a.out).length }));
+
+app.post('/api/push', auth, (q, r) => {
+  if (q.u.k !== 'm') return r.status(403).json({ error: 'ممنوع' });
+  const s = q.body;
+  if (!s || typeof s.endpoint !== 'string' || !s.keys) return r.status(400).json({ error: 'خطأ' });
+  const l = (D.subs[q.u.id] || []).filter(x => x.endpoint !== s.endpoint);
+  l.push({ endpoint: s.endpoint, keys: s.keys });
+  D.subs[q.u.id] = l.slice(-5);
+  r.json({ ok: true });
+});
+
+app.get('/api/proof/:id', auth, (q, r) => {
+  if (q.u.k !== 's') return r.status(403).end();
+  const id = +q.params.id;
+  if (!Number.isInteger(id)) return r.status(400).end();
+  for (const e of Object.values(EXT)) {
+    const f = path.join(PROOFS, id + '.' + e);
+    if (fs.existsSync(f)) return r.sendFile(f);
+  }
+  r.status(404).end();
+});
+
+app.post('/api/act', auth, express.json({ limit: '5mb' }), async (q, r) => {
+  const { type, data } = q.body || {}, u = q.u, fn = Object.hasOwn(A, type) ? A[type] : null;
+  const ok = u.k === 'm' ? M : u.role === 'admin' ? Object.keys(A).filter(x => !M.includes(x)) : ACC;
+  if (!fn || !ok.includes(type)) return r.status(403).json({ error: 'غير مسموح' });
+  try {
+    await fn(data || {}, u);
+    let state = {};
+    if (u.k === 'm') {
+      const st = mState(u.id);
+      st.members = [pubM(await Member.findOne({ id: u.id }))];
+      st.reqs = await Request.find({ m: u.id });
+      state = st;
+    } else {
+      const st = stState(u);
+      st.members = (await Member.find()).map(pubM);
+      st.reqs = await Request.find();
+      state = st;
+    }
+    r.json({ ok: true, state });
+  } catch (e) {
+    r.status(400).json({ error: e.message });
+  }
+});
+
+app.listen(PORT, () => console.log('TIGER GYM يعمل على المنفذ ' + PORT));
