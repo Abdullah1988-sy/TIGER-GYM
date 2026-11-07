@@ -13,6 +13,12 @@ mongoose.connect(mongoURI)
   .then(() => console.log('Connected to MongoDB Atlas successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
+// تعريف دوال المساعدة أولاً قبل استخدامها (حل المشكلة جذرياً)
+const hash = (p, salt) => crypto.scryptSync(String(p), salt, 32).toString('hex');
+const mk = p => { const salt = crypto.randomBytes(16).toString('hex'); return { salt, hash: hash(p, salt) }; };
+const eq = (a, b) => { a = Buffer.from(a); b = Buffer.from(b); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+const chk = (p, o) => eq(hash(p, o.salt), o.hash);
+
 // تعريف نماذج قاعدة البيانات
 const memberSchema = new mongoose.Schema({
   id: { type: String, unique: true, required: true },
@@ -66,10 +72,6 @@ const iso = d => d.toISOString().slice(0, 10),
       today = () => iso(new Date()),
       addD = (s, n) => { const d = new Date(s); d.setDate(d.getDate() + n); return iso(d); };
 const E = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const hash = (p, salt) => crypto.scryptSync(String(p), salt, 32).toString('hex');
-const mk = p => { const salt = crypto.randomBytes(16).toString('hex'); return { salt, hash: hash(p, salt) }; };
-const eq = (a, b) => { a = Buffer.from(a); b = Buffer.from(b); return a.length === b.length && crypto.timingSafeEqual(a, b); };
-const chk = (p, o) => eq(hash(p, o.salt), o.hash);
 
 webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@example.com', D.vapid.publicKey, D.vapid.privateKey);
 const sig = p => crypto.createHmac('sha256', D.secret).update(p).digest('base64url');
